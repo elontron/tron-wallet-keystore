@@ -43,7 +43,7 @@ public class Wallet {
 
     private func getNode(for derivationPath: DerivationPath) -> HDNode {
         var node = HDNode()
-        hdnode_from_seed(seed.bytes, Int32(seed.count), "secp256k1", &node)
+        hdnode_from_seed([UInt8](seed), Int32(seed.count), "secp256k1", &node)
         for index in derivationPath.indices {
             hdnode_private_ckd(&node, index.derivationIndex)
         }
