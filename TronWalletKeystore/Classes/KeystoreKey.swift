@@ -69,7 +69,25 @@ public struct KeystoreKey {
     }
 
     /// Initializes a `Key` by encrypting a private key with a password.
+    ///
+    /// - Important: `key` must be exactly 32 bytes, a raw secp256k1 scalar. Any other length, or
+    ///   a payload that looks like ASCII plaintext (mnemonic bytes routed here by mistake),
+    ///   throws `EncryptError.invalidPrivateKey`. `EthereumCrypto.getPublicKey(from:)` would
+    ///   otherwise silently read just the first 32 bytes of a longer buffer, collapsing the key
+    ///   space to an enumerable range.
     public init(password: String, key: Data) throws {
+        guard key.count == 32 else {
+            throw EncryptError.invalidPrivateKey
+        }
+        // ponytail: a printable-ASCII test instead of a BIP39-prefix parser. A uniformly random
+        // secp256k1 scalar lies entirely in 0x20...0x7E with probability (95/256)^32 ≈ 3.8e-14,
+        // while any prefix of an English mnemonic always does. Ceiling: a mnemonic from a
+        // non-ASCII wordlist slips past; the type switch in `KeyStore.import(json:)` is the real
+        // fix and this only backs it up.
+        guard key.contains(where: { $0 < 0x20 || $0 > 0x7E }) else {
+            throw EncryptError.invalidPrivateKey
+        }
+
         id = UUID().uuidString.lowercased()
         crypto = try KeystoreKeyHeader(password: password, data: key)
 
@@ -252,6 +270,10 @@ public enum EncryptError: Error {
     case invalidMnemonic
     case generateKeyPairFail
     case extractPrivateKeyFail
+    /// Raw private-key input to `KeystoreKey.init(password:key:)` failed validation: not exactly
+    /// 32 bytes, or entirely printable ASCII, which signals a mnemonic misrouted through the
+    /// raw-key path.
+    case invalidPrivateKey
 }
 
 extension KeystoreKey: Codable {

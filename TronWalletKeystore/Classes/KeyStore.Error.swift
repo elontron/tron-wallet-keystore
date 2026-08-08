@@ -6,6 +6,9 @@ extension KeyStore {
         case accountAlreadyExists
         case accountNotFound
         case invalidMnemonic
+        /// The address declared inside the keystore JSON does not match the address that can be
+        /// derived from the decrypted secret. Indicates a tampered or mis-typed keystore.
+        case invalidKey
 
         public var errorDescription: String? {
             switch self {
@@ -15,6 +18,8 @@ extension KeyStore {
                 return NSLocalizedString("Account not found", comment: "Error message when trying to access an account that does not exist")
             case .invalidMnemonic:
                 return NSLocalizedString("Invalid mnemonic phrase", comment: "Error message when trying to import an invalid mnemonic phrase")
+            case .invalidKey:
+                return NSLocalizedString("Invalid keystore: address does not match decrypted key", comment: "Error message when the address declared in a keystore JSON does not match the address derived from the decrypted secret")
             }
         }
     }

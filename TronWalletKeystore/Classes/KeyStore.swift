@@ -90,10 +90,32 @@ public final class KeyStore {
             privateKey.resetBytes(in: 0..<privateKey.count)
         }
 
-        let newKey = try KeystoreKey(password: newPassword, key: privateKey)
+        let newKey: KeystoreKey
+        switch key.type {
+        case .encryptedKey:
+            newKey = try KeystoreKey(password: newPassword, key: privateKey)
+        case .hierarchicalDeterministicWallet:
+            // An HD keystore's ciphertext holds the mnemonic, not a raw scalar, so it has to be
+            // rebuilt through the mnemonic path, mirroring `export()` below. Handing the payload
+            // to `KeystoreKey(password:key:)` would make the private key the first 32 characters
+            // of the mnemonic.
+            let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(privateKey)
+            guard Mnemonic.isValid(mnemonic) else {
+                throw Error.invalidMnemonic
+            }
+            newKey = try KeystoreKey(password: newPassword, mnemonic: mnemonic, passphrase: passphrase, derivationPath: key.derivationPath)
+        }
+
+        // The address declared inside the JSON must match the address derived from the decrypted
+        // secret. This holds for any keystore `export()` produces, so a mismatch means the file
+        // was tampered with or carries the wrong type.
+        guard newKey.address == key.address else {
+            throw Error.invalidKey
+        }
+
         keysByAddress[newKey.address] = newKey
 
-        let url = makeAccountURL(for: key.address)
+        let url = makeAccountURL(for: newKey.address)
         let account = Account(address: newKey.address, type: key.type, url: url)
         try save(account: account, in: keyDirectory)
         accountsByAddress[newKey.address] = account

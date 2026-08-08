@@ -84,4 +84,68 @@ class Tests: XCTestCase {
         XCTAssertThrowsError(try KeystoreKey(password: password, key: Data(repeating: 1, count: 16)))
         XCTAssertThrowsError(try KeystoreKey(password: password, key: Data(repeating: 0, count: 32)))
     }
+
+    /// `import(json:)` used to send every decrypted payload through the raw-key path. For an HD
+    /// keystore that made the private key the first 32 characters of the mnemonic.
+    func testHDKeystoreJSONRoundTripPreservesAddress() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.import(mnemonic: mnemonic, passphrase: "p@ss", encryptPassword: password)
+        let json = try store.export(account: account, password: password, newPassword: password)
+
+        let target = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("imported"))
+        let imported = try target.import(json: json, password: password, newPassword: password)
+
+        XCTAssertEqual(imported.address, account.address)
+        XCTAssertEqual(imported.type, .hierarchicalDeterministicWallet)
+        XCTAssertEqual(try target.exportMnemonic(account: imported, password: password), mnemonic)
+        XCTAssertEqual(try target.exportPrivateKey(account: imported, password: password),
+                       try store.exportPrivateKey(account: account, password: password))
+    }
+
+    /// A keystore whose declared address disagrees with the decrypted secret is tampered with.
+    func testImportRejectsAddressMismatch() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.import(mnemonic: mnemonic, encryptPassword: password)
+        let json = try store.export(account: account, password: password, newPassword: password)
+
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: json, options: []) as? [String: Any])
+        object["address"] = String(repeating: "1", count: 42)
+        let tampered = try JSONSerialization.data(withJSONObject: object, options: [])
+
+        let target = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("tampered"))
+        XCTAssertThrowsError(try target.import(json: tampered, password: password, newPassword: password)) { error in
+            switch error as? KeyStore.Error {
+            case .invalidKey: break
+            default: XCTFail("expected invalidKey, got \(error)")
+            }
+        }
+    }
+
+    /// Mnemonic bytes must never be accepted as a raw secp256k1 scalar, at any length.
+    func testKeystoreKeyRejectsMnemonicASCIIPayload() throws {
+        let payload = try XCTUnwrap(mnemonic.data(using: .ascii))
+        assertRejectsPrivateKey(payload)
+        assertRejectsPrivateKey(payload.prefix(32))
+    }
+
+    /// 32 bytes of printable ASCII form a valid scalar, so only the guard rejects them.
+    func testKeystoreKeyRejectsAllPrintableASCIIInput() {
+        assertRejectsPrivateKey(Data(repeating: 0x41, count: 32))
+    }
+
+    /// The guard must not reject legitimate keys.
+    func testKeystoreKeyAcceptsValid32BytePrivateKey() throws {
+        let privateKey = try Wallet(mnemonic: mnemonic).getKey(at: 0).privateKey
+        XCTAssertEqual(privateKey.count, 32)
+        XCTAssertEqual(try KeystoreKey(password: password, key: privateKey).type, .encryptedKey)
+    }
+
+    private func assertRejectsPrivateKey(_ key: Data, file: StaticString = #file, line: UInt = #line) {
+        XCTAssertThrowsError(try KeystoreKey(password: password, key: key), file: file, line: line) { error in
+            switch error as? EncryptError {
+            case .invalidPrivateKey: break
+            default: XCTFail("expected invalidPrivateKey, got \(error)", file: file, line: line)
+            }
+        }
+    }
 }
