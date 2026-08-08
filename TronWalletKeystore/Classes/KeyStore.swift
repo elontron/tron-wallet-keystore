@@ -114,9 +114,9 @@ public final class KeyStore {
             throw Error.invalidMnemonic
         }
 
-        let wallet = Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath)
-        let pubKey = wallet.getKey(at: 0).publicKey
-        let address = KeystoreKey.decodeAddress(from: pubKey)
+        let wallet = try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath)
+        let pubKey = try wallet.getKey(at: 0).publicKey
+        let address = try KeystoreKey.decodeAddress(from: pubKey)
         if self.account(for: address) != nil {
             throw Error.accountAlreadyExists
         }
@@ -154,10 +154,8 @@ public final class KeyStore {
         case .encryptedKey:
             newKey = try KeystoreKey(password: newPassword, key: privateKey)
         case .hierarchicalDeterministicWallet:
-            guard let string = String(data: privateKey, encoding: .ascii) else {
-                throw EncryptError.invalidMnemonic
-            }
-            newKey = try KeystoreKey(password: newPassword, mnemonic: string, passphrase: key.passphrase, derivationPath: key.derivationPath)
+            let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(privateKey)
+            newKey = try KeystoreKey(password: newPassword, mnemonic: mnemonic, passphrase: passphrase, derivationPath: key.derivationPath)
         }
         return try JSONEncoder().encode(newKey)
     }
@@ -182,10 +180,8 @@ public final class KeyStore {
         case .encryptedKey:
             return privateKey
         case .hierarchicalDeterministicWallet:
-            guard let string = String(data: privateKey, encoding: .ascii) else {
-                throw EncryptError.invalidMnemonic
-            }
-            return Wallet(mnemonic: string, passphrase: key.passphrase, path: key.derivationPath).getKey(at: 0).privateKey
+            let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(privateKey)
+            return try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: key.derivationPath).getKey(at: 0).privateKey
         }
     }
     
@@ -209,14 +205,7 @@ public final class KeyStore {
         case .encryptedKey:
             throw EncryptError.invalidMnemonic
         case .hierarchicalDeterministicWallet:
-            guard let string = String(data: data, encoding: .ascii) else {
-                throw EncryptError.invalidMnemonic
-            }
-            if string.hasSuffix("\0") {
-                return String(string.dropLast())
-            } else {
-                return string
-            }
+            return try KeystoreKey.splitMnemonicPayload(data).mnemonic
         }
     }
 
@@ -241,10 +230,8 @@ public final class KeyStore {
         case .encryptedKey:
             newKey = try KeystoreKey(password: newPassword, key: privateKey)
         case .hierarchicalDeterministicWallet:
-            guard let string = String(data: privateKey, encoding: .ascii) else {
-                throw EncryptError.invalidMnemonic
-            }
-            newKey = try KeystoreKey(password: newPassword, mnemonic: string, passphrase: key.passphrase, derivationPath: derivationPath)
+            let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(privateKey)
+            newKey = try KeystoreKey(password: newPassword, mnemonic: mnemonic, passphrase: passphrase, derivationPath: derivationPath)
         }
         keysByAddress[newKey.address] = newKey
         try save(key: newKey, to: account.url)
@@ -345,9 +332,9 @@ extension KeyStore {
             throw Error.invalidMnemonic
         }
         
-        let wallet = Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath)
-        let pubKey = wallet.getKey(at: 0).publicKey
-        let address = KeystoreKey.decodeAddress(from: pubKey)
+        let wallet = try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath)
+        let pubKey = try wallet.getKey(at: 0).publicKey
+        let address = try KeystoreKey.decodeAddress(from: pubKey)
         if self.account(for: address) != nil {
             throw Error.accountAlreadyExists
         }
@@ -355,10 +342,10 @@ extension KeyStore {
     }
     
     /// Generate an address with mnemonic derivationPath.
-    public func generateWalletAddress(derivationPath:String = Wallet.defaultPath,mnemonic:String,password:String = "") -> Address{
-        let wallet = Wallet(mnemonic: mnemonic, passphrase: password, path: derivationPath)
-        let pubKey = wallet.getKey(at: 0).publicKey
-        return KeystoreKey.decodeAddress(from: pubKey)
+    public func generateWalletAddress(derivationPath:String = Wallet.defaultPath,mnemonic:String,password:String = "") throws -> Address{
+        let wallet = try Wallet(mnemonic: mnemonic, passphrase: password, path: derivationPath)
+        let pubKey = try wallet.getKey(at: 0).publicKey
+        return try KeystoreKey.decodeAddress(from: pubKey)
     }
     
     /// get an path with account.

@@ -18,7 +18,9 @@ public struct KeystoreKey {
     /// Key header with encrypted private key and crypto parameters.
     public var crypto: KeystoreKeyHeader
 
-    /// Mnemonic passphrase
+    /// Mnemonic passphrase, only populated when this key was just created. It is encrypted
+    /// alongside the mnemonic rather than stored in the JSON, so for keys loaded from disk the
+    /// decrypted payload is the authoritative source and this stays empty.
     public var passphrase = ""
     public var mnemonic: String?
 
@@ -55,7 +57,7 @@ public struct KeystoreKey {
             let key = keyRepresentation[(keyRepresentation.count - 32)...]
             try self.init(password: password, key: key)
         case .hierarchicalDeterministicWallet:
-            let mnemonic = Mnemonic.generate(strength: 128)
+            let mnemonic = try Mnemonic.generate(strength: 128)
             try self.init(password: password, mnemonic: mnemonic, passphrase: "")
         }
     }
@@ -72,7 +74,7 @@ public struct KeystoreKey {
         crypto = try KeystoreKeyHeader(password: password, data: key)
 
         let pubKey = EthereumCrypto.getPublicKey(from: key)
-        address = KeystoreKey.decodeAddress(from: pubKey)
+        address = try KeystoreKey.decodeAddress(from: pubKey)
         type = .encryptedKey
     }
 
@@ -80,26 +82,60 @@ public struct KeystoreKey {
     public init(password: String, mnemonic: String, passphrase: String = "", derivationPath: String = Wallet.defaultPath) throws {
         id = UUID().uuidString.lowercased()
 
-        guard let cstring = mnemonic.cString(using: .ascii) else {
-            throw EncryptError.invalidMnemonic
+        var data = try KeystoreKey.makeMnemonicPayload(mnemonic: mnemonic, passphrase: passphrase)
+        defer {
+            data.resetBytes(in: 0 ..< data.count)
         }
-        let data = Data(bytes: cstring.map({ UInt8($0) }))
         crypto = try KeystoreKeyHeader(password: password, data: data)
 
-        let key = Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath).getKey(at: 0)
+        let key = try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath).getKey(at: 0)
         let pubKey = key.publicKey
-        address = KeystoreKey.decodeAddress(from: pubKey)
+        address = try KeystoreKey.decodeAddress(from: pubKey)
         type = .hierarchicalDeterministicWallet
         self.passphrase = passphrase
         self.mnemonic = mnemonic
         self.derivationPath = derivationPath
     }
 
+    /// Builds the payload encrypted for an HD wallet: the mnemonic as NUL-terminated ASCII
+    /// followed by the passphrase as UTF-8.
+    static func makeMnemonicPayload(mnemonic: String, passphrase: String) throws -> Data {
+        guard let cstring = mnemonic.cString(using: .ascii) else {
+            throw EncryptError.invalidMnemonic
+        }
+        var data = Data(bytes: cstring.map({ UInt8(bitPattern: $0) }))
+        data.append(contentsOf: Array(passphrase.utf8))
+        return data
+    }
+
+    /// Splits a decrypted HD payload back into its mnemonic and passphrase. Keys written before
+    /// the passphrase was persisted end at the NUL terminator and yield an empty passphrase.
+    static func splitMnemonicPayload(_ data: Data) throws -> (mnemonic: String, passphrase: String) {
+        let parts = data.split(separator: 0, maxSplits: 1, omittingEmptySubsequences: false)
+        guard let mnemonicData = parts.first,
+            let mnemonic = String(data: mnemonicData, encoding: .ascii),
+            !mnemonic.isEmpty else {
+            throw EncryptError.invalidMnemonic
+        }
+        guard parts.count > 1 else {
+            return (mnemonic, "")
+        }
+        guard let passphrase = String(data: parts[1], encoding: .utf8) else {
+            throw EncryptError.invalidMnemonic
+        }
+        return (mnemonic, passphrase)
+    }
+
     /// Decodes an Ethereum address from a public key.
-    static func decodeAddress(from publicKey: Data) -> TronCore.Address {
-        precondition(publicKey.count == 65, "Expect 64-byte public key")
-        precondition(publicKey[0] == 4, "Invalid public key")
-        let sha3 = publicKey[1...].sha3(.keccak256)
+    ///
+    /// - Throws: `DecryptError.invalidPublicKey` if the key is not an uncompressed secp256k1
+    ///   point. `EthereumCrypto` reports failure as an empty `Data` because its return type is
+    ///   `nonnull`, so an unchecked result would reach here.
+    static func decodeAddress(from publicKey: Data) throws -> TronCore.Address {
+        guard publicKey.count == 65, publicKey.first == 4 else {
+            throw DecryptError.invalidPublicKey
+        }
+        let sha3 = publicKey.dropFirst().sha3(.keccak256)
         var data = Data(hex: "41")
         data.append(sha3[12..<32])
         return TronCore.Address(data: data)
@@ -152,25 +188,37 @@ public struct KeystoreKey {
     /// - Returns: signature
     /// - Throws: `DecryptError` or `Secp256k1Error`
     public func sign(hash: Data, password: String) throws -> Data {
+        var key = try privateKey(password: password)
+        defer {
+            // Clear memory after signing
+            key.resetBytes(in: 0..<key.count)
+        }
+        return try KeystoreKey.checkedSignature(EthereumCrypto.sign(hash: hash, privateKey: key))
+    }
+
+    /// Decrypts the key and derives the private key to sign with. The caller owns the result and
+    /// is responsible for clearing it.
+    private func privateKey(password: String) throws -> Data {
         switch type {
         case .encryptedKey:
-            var key = try decrypt(password: password)
-            defer {
-                // Clear memory after signing
-                key.resetBytes(in: 0..<key.count)
-            }
-            return EthereumCrypto.sign(hash: hash, privateKey: key)
+            return try decrypt(password: password)
         case .hierarchicalDeterministicWallet:
-            guard var mnemonic = String(data: try decrypt(password: password), encoding: .ascii) else {
-                throw DecryptError.invalidPassword
-            }
+            var decrypted = try decrypt(password: password)
             defer {
-                // Clear memory after signing
-                mnemonic.replaceSubrange(mnemonic.startIndex ..< mnemonic.endIndex, with: repeatElement(Character(" "), count: mnemonic.count))
+                decrypted.resetBytes(in: 0 ..< decrypted.count)
             }
-            let wallet = Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath)
-            return EthereumCrypto.sign(hash: hash, privateKey: wallet.getKey(at: 0).privateKey)
+            let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(decrypted)
+            return try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: derivationPath).getKey(at: 0).privateKey
         }
+    }
+
+    /// `EthereumCrypto` reports failure as an empty `Data` because its return type is `nonnull`.
+    /// An unchecked result would be handed to callers as a valid signature.
+    private static func checkedSignature(_ signature: Data) throws -> Data {
+        guard signature.count == 65 else {
+            throw DecryptError.invalidSignature
+        }
+        return signature
     }
 
     /// Signs multiple hashes with the given password.
@@ -181,26 +229,12 @@ public struct KeystoreKey {
     /// - Returns: [signature]
     /// - Throws: `DecryptError` or `Secp256k1Error`
     public func signHashes(_ hashes: [Data], password: String) throws -> [Data] {
-        switch type {
-        case .encryptedKey:
-            var key = try decrypt(password: password)
-            defer {
-                // Clear memory after signing
-                key.resetBytes(in: 0..<key.count)
-            }
-            return hashes.map({ EthereumCrypto.sign(hash: $0, privateKey: key) })
-        case .hierarchicalDeterministicWallet:
-            guard var mnemonic = String(data: try decrypt(password: password), encoding: .ascii) else {
-                throw DecryptError.invalidPassword
-            }
-            defer {
-                // Clear memory after signing
-                mnemonic.replaceSubrange(mnemonic.startIndex ..< mnemonic.endIndex, with: repeatElement(Character(" "), count: mnemonic.count))
-            }
-            let wallet = Wallet(mnemonic: mnemonic)
-            let key = wallet.getKey(at: 0).privateKey
-            return hashes.map({ EthereumCrypto.sign(hash: $0, privateKey: key) })
+        var key = try privateKey(password: password)
+        defer {
+            // Clear memory after signing
+            key.resetBytes(in: 0..<key.count)
         }
+        return try hashes.map({ try KeystoreKey.checkedSignature(EthereumCrypto.sign(hash: $0, privateKey: key)) })
     }
 }
 
@@ -210,6 +244,8 @@ public enum DecryptError: Error {
     case invalidCipher
     case invalidPassword
     case missingAccountKey
+    case invalidPublicKey
+    case invalidSignature
 }
 
 public enum EncryptError: Error {
