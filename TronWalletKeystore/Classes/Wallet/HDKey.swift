@@ -1,5 +1,4 @@
 
-import TrezorCrypto
 import TronCore
 
 // Hierarchical deterministic key.

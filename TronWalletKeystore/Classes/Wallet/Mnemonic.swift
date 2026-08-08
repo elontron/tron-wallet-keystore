@@ -1,6 +1,6 @@
 
 import Foundation
-import TrezorCrypto
+import TronCore
 
 public final class Mnemonic {
     /// Generates a menmoic string with the given strength in bits.
@@ -10,7 +10,13 @@ public final class Mnemonic {
     /// - Returns: mnemonic string
     public static func generate(strength: Int) -> String {
         precondition(strength % 32 == 0 && strength >= 128 && strength <= 256)
-        let rawString = mnemonic_generate(Int32(strength))!
+        let length = 240
+        var buffer = [CChar](repeating: 0, count: length)
+        guard let rawString = buffer.withUnsafeMutableBufferPointer({ buf in
+            mnemonic_generate(Int32(strength), buf.baseAddress, Int32(length))
+        }) else {
+            return ""
+        }
         return String(cString: rawString)
     }
 
@@ -21,10 +27,20 @@ public final class Mnemonic {
     /// - Returns: mnemonic string
     public static func generate(from data: Data) -> String {
         precondition(data.count % 4 == 0 && data.count >= 16 && data.count <= 32)
-        let rawString = data.withUnsafeBytes { dataPtr in
-            mnemonic_from_data(dataPtr, Int32(data.count))!
+        let length = 240
+        var buffer = [CChar](repeating: 0, count: length)
+        let rawString = buffer.withUnsafeMutableBufferPointer { buf -> UnsafePointer<CChar>? in
+            data.withUnsafeBytes { (dataPtr: UnsafeRawBufferPointer) -> UnsafePointer<CChar>? in
+                guard let baseAddress = dataPtr.baseAddress else {
+                    return nil
+                }
+                return mnemonic_from_data(baseAddress.assumingMemoryBound(to: UInt8.self), Int32(data.count), buf.baseAddress, Int32(length))
+            }
         }
-        return String(cString: rawString)
+        guard let rawStringValue = rawString else {
+            return ""
+        }
+        return String(cString: rawStringValue)
     }
 
     /// Determines if a mnemonic string is valid.
@@ -32,7 +48,10 @@ public final class Mnemonic {
     /// - Parameter string: mnemonic string
     /// - Returns: `true` if the string is valid; `false` otherwise.
     public static func isValid(_ string: String) -> Bool {
-        return mnemonic_check(string.cString(using: String.Encoding.ascii)) != 0
+        guard let asciiCString = string.cString(using: String.Encoding.ascii) else {
+            return false
+        }
+        return mnemonic_check(asciiCString) != 0
     }
 
     /// Derives the wallet seed.
@@ -44,9 +63,10 @@ public final class Mnemonic {
     public static func deriveSeed(mnemonic: String, passphrase: String) -> Data {
         precondition(passphrase.count <= 256, "Passphrase too long")
         var seed = Data(repeating: 0, count: 512 / 8)
-        seed.withUnsafeMutableBytes { seedPtr in
-            mnemonic_to_seed(mnemonic, passphrase, seedPtr, nil)
+        let result = seed.withUnsafeMutableBytes { seedPtr in
+            mnemonic_to_seed(mnemonic, passphrase, seedPtr.bindMemory(to: UInt8.self).baseAddress, nil)
         }
+        precondition(result == 1, "mnemonic_to_seed failed")
         return seed
     }
 }

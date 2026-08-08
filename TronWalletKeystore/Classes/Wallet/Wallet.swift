@@ -1,5 +1,5 @@
 
-import TrezorCrypto
+import TronCore
 
 /// A hierarchical deterministic wallet.
 public class Wallet {
