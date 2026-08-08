@@ -2,21 +2,50 @@
 import Foundation
 
 /// Scrypt function parameters.
+///
+/// - Note (TL-KDF-001, 2026-08 audit):
+///   The historical default was `n = lightN (4096), p = lightP (6)` (≈4 MiB), which
+///   is the go-ethereum "light" preset. That is too weak to meaningfully slow down
+///   offline brute-force of weak user passwords if the keystore ever leaves the
+///   device (e.g. forensic dump, user manually exports and stores insecurely).
+///   The default is now `balancedN / balancedP` (≈64 MiB, ~250–500 ms on modern
+///   iPhones, ~1 s on the oldest iOS 15.1 device). We deliberately do NOT jump to
+///   `standardN` (256 MiB) because that will OOM low-end supported devices.
+///
+/// - Note (thread & memory safety):
+///   Each call site (`KeystoreKeyHeader.init(password:data:)`,
+///   `KeystoreKey.decrypt(password:)`) instantiates a fresh `Scrypt` object per
+///   invocation, so this struct itself is used only from one thread at a time.
+///   However raising N by 16× also raises peak RAM per concurrent scrypt run
+///   from ~4 MiB to ~64 MiB. If the KeyStore/TrezorCrypto call sites are ever
+///   invoked concurrently (see IOS-CONC-001), two overlapping runs already cost
+///   ≥128 MiB, which is close to the foreground budget on iPhone 6s. Serialize
+///   the KeyStore layer alongside the IOS-CONC-001 fix.
 public struct ScryptParams {
-    /// The N parameter of Scrypt encryption algorithm, using 256MB memory and taking approximately 1s CPU time on a
-    /// modern processor.
+    /// Ethereum "standard" preset. Uses ≈256 MiB and ~1 s CPU on a modern desktop.
+    /// Not used as the mobile default — OOMs on low-end supported devices.
     public static let standardN = 1 << 18
 
-    /// The P parameter of Scrypt encryption algorithm, using 256MB memory and taking approximately 1s CPU time on a
-    /// modern processor.
+    /// Parallelization factor paired with `standardN`.
     public static let standardP = 1
 
-    /// The N parameter of Scrypt encryption algorithm, using 4MB memory and taking approximately 100ms CPU time on a
-    /// modern processor.
+    /// Balanced mobile default (TL-KDF-001).
+    /// Peak RAM ≈ 128 * r * n = 128 * 8 * 65536 = 64 MiB.
+    /// Target CPU ≈ 250–500 ms on modern iPhones, ~1 s on iPhone 6s (iOS 15.1 floor).
+    public static let balancedN = 1 << 16
+
+    /// Parallelization factor paired with `balancedN`.
+    /// Matches ethereum's canonical `p = 1`, so the resulting JSON stays
+    /// round-trippable with any standards-compliant wallet.
+    public static let balancedP = 1
+
+    /// Ethereum "light" preset. Uses ≈4 MiB and ~100 ms CPU on a modern desktop.
+    /// Retained for backward-compat (decoding files produced with these params
+    /// still works via the per-file kdfparams) and for explicit callers that need
+    /// the historical value; do NOT reintroduce it as the default (see TL-KDF-001).
     public static let lightN = 1 << 12
 
-    /// The P parameter of Scrypt encryption algorithm, using 4MB memory and taking approximately 100ms CPU time on a
-    /// modern processor.
+    /// Parallelization factor paired with `lightN`.
     public static let lightP = 6
 
     /// Default `R` parameter of Scrypt encryption algorithm.
@@ -31,11 +60,11 @@ public struct ScryptParams {
     /// Desired key length in bytes.
     public var desiredKeyLength = defaultDesiredKeyLength
 
-    /// CPU/Memory cost factor.
-    public var n = lightN
+    /// CPU/Memory cost factor. Defaults to `balancedN` (TL-KDF-001).
+    public var n = balancedN
 
-    /// Parallelization factor (1..232-1 * hLen/MFlen).
-    public var p = lightP
+    /// Parallelization factor (1..232-1 * hLen/MFlen). Defaults to `balancedP`.
+    public var p = balancedP
 
     /// Block size factor.
     public var r = defaultR
@@ -117,3 +146,4 @@ extension ScryptParams: Codable {
         try container.encode(r, forKey: .r)
     }
 }
+
