@@ -7,14 +7,18 @@ class Tests: XCTestCase {
     private let password = "keystore-password"
 
     private var keyDirectory: URL!
+    private var shouldRemoveKeyDirectory = true
 
     override func setUp() {
         super.setUp()
         keyDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        shouldRemoveKeyDirectory = true
     }
 
     override func tearDown() {
-        try? FileManager.default.removeItem(at: keyDirectory)
+        if shouldRemoveKeyDirectory {
+            try? FileManager.default.removeItem(at: keyDirectory)
+        }
         super.tearDown()
     }
 
@@ -138,6 +142,72 @@ class Tests: XCTestCase {
         let privateKey = try Wallet(mnemonic: mnemonic).getKey(at: 0).privateKey
         XCTAssertEqual(privateKey.count, 32)
         XCTAssertEqual(try KeystoreKey(password: password, key: privateKey).type, .encryptedKey)
+    }
+
+    func testConcurrentImportStoresOneAccount() throws {
+        let password = self.password
+        let key = try KeystoreKey(password: password, mnemonic: mnemonic)
+        let json = try JSONEncoder().encode(key)
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let queue = DispatchQueue(label: "org.tronlink.keystore.concurrent-import", attributes: .concurrent)
+        let start = DispatchSemaphore(value: 0)
+        let ready = DispatchGroup()
+        let group = DispatchGroup()
+        let resultLock = NSLock()
+        var successCount = 0
+        var duplicateCount = 0
+        var unexpectedErrors = [Swift.Error]()
+
+        for _ in 0..<2 {
+            ready.enter()
+            group.enter()
+            queue.async {
+                ready.leave()
+                start.wait()
+                defer { group.leave() }
+                do {
+                    _ = try store.import(json: json, password: password, newPassword: password)
+                    resultLock.lock()
+                    successCount += 1
+                    resultLock.unlock()
+                } catch KeyStore.Error.accountAlreadyExists {
+                    resultLock.lock()
+                    duplicateCount += 1
+                    resultLock.unlock()
+                } catch {
+                    resultLock.lock()
+                    unexpectedErrors.append(error)
+                    resultLock.unlock()
+                }
+            }
+        }
+
+        guard ready.wait(timeout: .now() + 5) == .success else {
+            start.signal()
+            start.signal()
+            if group.wait(timeout: .now() + 60) != .success {
+                shouldRemoveKeyDirectory = false
+            }
+            XCTFail("concurrent import workers failed to start")
+            return
+        }
+        start.signal()
+        start.signal()
+        guard group.wait(timeout: .now() + 60) == .success else {
+            // ponytail: synchronous import cannot be cancelled; use a subprocess if timeout cleanup becomes necessary.
+            shouldRemoveKeyDirectory = false
+            XCTFail("concurrent imports timed out")
+            return
+        }
+
+        XCTAssertEqual(successCount, 1)
+        XCTAssertEqual(duplicateCount, 1)
+        XCTAssertTrue(unexpectedErrors.isEmpty, "unexpected errors: \(unexpectedErrors)")
+        XCTAssertEqual(store.accounts.count, 1)
+        let account = try XCTUnwrap(store.accounts.first)
+        XCTAssertNotNil(store.key(for: account.address))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: keyDirectory, includingPropertiesForKeys: []).count, 1)
+        XCTAssertEqual(try KeyStore(keyDirectory: keyDirectory).accounts.count, 1)
     }
 
     private func assertRejectsPrivateKey(_ key: Data, file: StaticString = #file, line: UInt = #line) {

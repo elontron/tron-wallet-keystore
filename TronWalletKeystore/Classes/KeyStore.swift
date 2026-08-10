@@ -13,6 +13,10 @@ public final class KeyStore {
     /// Dictionary of keys by address.
     private var keysByAddress = [Address: KeystoreKey]()
 
+    /// Mutations always acquire this lock before `stateLock`; reads only acquire `stateLock`.
+    private let mutationLock = NSLock()
+    private let stateLock = NSLock()
+
     /// Creates a `KeyStore` for the given directory.
     public init(keyDirectory: URL) throws {
         self.keyDirectory = keyDirectory
@@ -38,38 +42,62 @@ public final class KeyStore {
 
     /// List of accounts.
     public var accounts: [Account] {
-        return Array(accountsByAddress.values)
+        return withStateLock {
+            Array(accountsByAddress.values)
+        }
     }
 
     /// Retrieves an account for the given address, if it exists.
     public func account(for address: Address) -> Account? {
-        return accountsByAddress[address]
+        return withStateLock {
+            accountsByAddress[address]
+        }
     }
 
     /// Retrieves a key for the given address, if it exists.
     public func key(for address: Address) -> KeystoreKey? {
-        return keysByAddress[address]
+        return withStateLock {
+            keysByAddress[address]
+        }
     }
 
     /// Creates a new account.
     public func createAccount(password: String, type: AccountType) throws -> Account {
-        let key = try KeystoreKey(password: password, type: type)
-        keysByAddress[key.address] = key
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
 
+        let key = try KeystoreKey(password: password, type: type)
         let url = makeAccountURL(for: key.address)
         let account = Account(address: key.address, type: type, url: url)
-        try save(account: account, in: keyDirectory)
-        accountsByAddress[key.address] = account
+
+        try withStateLock {
+            try save(key: key, to: url)
+            keysByAddress[key.address] = key
+            accountsByAddress[key.address] = account
+        }
         return account
     }
     
     public func addAccount(account: Account) throws {
-        try save(account: account, in: keyDirectory)
-        accountsByAddress[account.address] = account
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+
+        try withStateLock {
+            guard let key = keysByAddress[account.address] else {
+                throw DecryptError.missingAccountKey
+            }
+            try save(key: key, to: account.url)
+            accountsByAddress[account.address] = account
+        }
     }
     
     public func addKey(key: KeystoreKey) throws {
-        keysByAddress[key.address] = key
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+
+        withStateLock {
+            keysByAddress[key.address] = key
+        }
     }
 
     /// Imports an encrypted JSON key.
@@ -80,6 +108,9 @@ public final class KeyStore {
     ///   - newPassword: password to use for the imported key
     /// - Returns: new account
     public func `import`(json: Data, password: String, newPassword: String) throws -> Account {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+
         let key = try JSONDecoder().decode(KeystoreKey.self, from: json)
         if self.account(for: key.address) != nil {
             throw Error.accountAlreadyExists
@@ -113,12 +144,14 @@ public final class KeyStore {
             throw Error.invalidKey
         }
 
-        keysByAddress[newKey.address] = newKey
-
         let url = makeAccountURL(for: newKey.address)
         let account = Account(address: newKey.address, type: key.type, url: url)
-        try save(account: account, in: keyDirectory)
-        accountsByAddress[newKey.address] = account
+
+        try withStateLock {
+            try save(key: newKey, to: url)
+            keysByAddress[newKey.address] = newKey
+            accountsByAddress[newKey.address] = account
+        }
 
         return account
     }
@@ -132,6 +165,9 @@ public final class KeyStore {
     ///   - encryptPassword: password to use for encrypting
     /// - Returns: new account
     public func `import`(mnemonic: String, passphrase: String = "", derivationPath: String = Wallet.defaultPath, encryptPassword: String) throws -> Account {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+
         if !Mnemonic.isValid(mnemonic) {
             throw Error.invalidMnemonic
         }
@@ -144,12 +180,14 @@ public final class KeyStore {
         }
 
         let newKey = try KeystoreKey(password: encryptPassword, mnemonic: mnemonic, passphrase: passphrase, derivationPath: derivationPath)
-        keysByAddress[newKey.address] = newKey
-
         let url = makeAccountURL(for: address)
         let account = Account(address: address, type: .hierarchicalDeterministicWallet, url: url)
-        try save(account: account, in: keyDirectory)
-        accountsByAddress[newKey.address] = account
+
+        try withStateLock {
+            try save(key: newKey, to: url)
+            keysByAddress[newKey.address] = newKey
+            accountsByAddress[newKey.address] = account
+        }
 
         return account
     }
@@ -162,7 +200,7 @@ public final class KeyStore {
     ///   - newPassword: password to use for exported key
     /// - Returns: encrypted JSON key
     public func export(account: Account, password: String, newPassword: String) throws -> Data {
-        guard let key = keysByAddress[account.address] else {
+        guard let key = withStateLock({ keysByAddress[account.address] }) else {
             throw DecryptError.missingAccountKey
         }
 
@@ -189,7 +227,7 @@ public final class KeyStore {
     ///   - password: account password
     /// - Returns: private key data
     public func exportPrivateKey(account: Account, password: String) throws -> Data {
-        guard let key = keysByAddress[account.address] else {
+        guard let key = withStateLock({ keysByAddress[account.address] }) else {
             throw DecryptError.missingAccountKey
         }
 
@@ -215,7 +253,7 @@ public final class KeyStore {
     /// - Returns: mnemonic phrase
     /// - Throws: `EncryptError.invalidMnemonic` if the account is not an HD wallet.
     public func exportMnemonic(account: Account, password: String) throws -> String {
-        guard let key = keysByAddress[account.address] else {
+        guard let key = withStateLock({ keysByAddress[account.address] }) else {
             throw DecryptError.missingAccountKey
         }
         var data = try key.decrypt(password: password)
@@ -238,7 +276,10 @@ public final class KeyStore {
     ///   - password: current password
     ///   - newPassword: new password
     public func update(account: Account, password: String, newPassword: String, derivationPath: String = Wallet.defaultPath) throws {
-        guard let key = keysByAddress[account.address] else {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+
+        guard let key = withStateLock({ keysByAddress[account.address] }) else {
             throw DecryptError.missingAccountKey
         }
 
@@ -255,19 +296,25 @@ public final class KeyStore {
             let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(privateKey)
             newKey = try KeystoreKey(password: newPassword, mnemonic: mnemonic, passphrase: passphrase, derivationPath: derivationPath)
         }
-        keysByAddress[newKey.address] = newKey
-        try save(key: newKey, to: account.url)
+        try withStateLock {
+            try save(key: newKey, to: account.url)
+            keysByAddress[newKey.address] = newKey
+        }
     }
 
     /// Deletes an account including its key if the password is correct.
     public func delete(account: Account, password: String) throws {
-        guard let key = keysByAddress[account.address] else {
-            throw DecryptError.missingAccountKey
-        }
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
 
-        keysByAddress[account.address] = nil
-        accountsByAddress[account.address] = nil
-        try FileManager.default.removeItem(at: account.url)
+        try withStateLock {
+            guard keysByAddress[account.address] != nil else {
+                throw DecryptError.missingAccountKey
+            }
+            try FileManager.default.removeItem(at: account.url)
+            keysByAddress[account.address] = nil
+            accountsByAddress[account.address] = nil
+        }
     }
 
     /// Calculates a ECDSA signature for the give hash.
@@ -279,7 +326,7 @@ public final class KeyStore {
     /// - Returns: signature
     /// - Throws: `DecryptError`, `Secp256k1Error`, or `KeyStore.Error`
     public func signHash(_ data: Data, account: Account, password: String) throws -> Data {
-        guard let key = keysByAddress[account.address] else {
+        guard let key = withStateLock({ keysByAddress[account.address] }) else {
             throw KeyStore.Error.accountNotFound
         }
         return try key.sign(hash: data, password: password)
@@ -294,7 +341,7 @@ public final class KeyStore {
     /// - Returns: array of signatures
     /// - Throws: `DecryptError` or `Secp256k1Error` or `KeyStore.Error`
     public func signHashes(_ data: [Data], account: Account, password: String) throws -> [Data] {
-        guard let key = keysByAddress[account.address] else {
+        guard let key = withStateLock({ keysByAddress[account.address] }) else {
             throw KeyStore.Error.accountNotFound
         }
         return try key.signHashes(data, password: password)
@@ -306,12 +353,10 @@ public final class KeyStore {
         return keyDirectory.appendingPathComponent(generateFileName(address: address))
     }
 
-    /// Saves the account to the given directory.
-    private func save(account: Account, in directory: URL) throws {
-        guard let key = keysByAddress[account.address] else {
-            throw DecryptError.missingAccountKey
-        }
-        try save(key: key, to: account.url)
+    private func withStateLock<T>(_ body: () throws -> T) rethrows -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return try body()
     }
 
     /// Generates a unique file name for an address.
@@ -372,9 +417,11 @@ extension KeyStore {
     
     /// get an path with account.
     public func generateWalletPath(account: Account) throws -> String {
-        guard let key = keysByAddress[account.address] else {
-            throw DecryptError.missingAccountKey
+        return try withStateLock {
+            guard let key = keysByAddress[account.address] else {
+                throw DecryptError.missingAccountKey
+            }
+            return key.derivationPath
         }
-        return key.derivationPath
     }
 }
