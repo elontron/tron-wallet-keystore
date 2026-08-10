@@ -6,6 +6,13 @@ import TronCore
 
 /// Key definition.
 public struct KeystoreKey {
+    private static let secp256k1Order = Data([
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+        0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b,
+        0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x41,
+    ])
+
     /// Ethereum address.
     public var address: TronCore.Address
 
@@ -70,21 +77,11 @@ public struct KeystoreKey {
 
     /// Initializes a `Key` by encrypting a private key with a password.
     ///
-    /// - Important: `key` must be exactly 32 bytes, a raw secp256k1 scalar. Any other length, or
-    ///   a payload that looks like ASCII plaintext (mnemonic bytes routed here by mistake),
-    ///   throws `EncryptError.invalidPrivateKey`. `EthereumCrypto.getPublicKey(from:)` would
-    ///   otherwise silently read just the first 32 bytes of a longer buffer, collapsing the key
-    ///   space to an enumerable range.
+    /// - Important: `key` must be exactly 32 bytes and a scalar in `1..<secp256k1Order`.
     public init(password: String, key: Data) throws {
-        guard key.count == 32 else {
-            throw EncryptError.invalidPrivateKey
-        }
-        // ponytail: a printable-ASCII test instead of a BIP39-prefix parser. A uniformly random
-        // secp256k1 scalar lies entirely in 0x20...0x7E with probability (95/256)^32 ≈ 3.8e-14,
-        // while any prefix of an English mnemonic always does. Ceiling: a mnemonic from a
-        // non-ASCII wordlist slips past; the type switch in `KeyStore.import(json:)` is the real
-        // fix and this only backs it up.
-        guard key.contains(where: { $0 < 0x20 || $0 > 0x7E }) else {
+        guard key.count == 32,
+              key.contains(where: { $0 != 0 }),
+              key.lexicographicallyPrecedes(Self.secp256k1Order) else {
             throw EncryptError.invalidPrivateKey
         }
 
@@ -270,9 +267,7 @@ public enum EncryptError: Error {
     case invalidMnemonic
     case generateKeyPairFail
     case extractPrivateKeyFail
-    /// Raw private-key input to `KeystoreKey.init(password:key:)` failed validation: not exactly
-    /// 32 bytes, or entirely printable ASCII, which signals a mnemonic misrouted through the
-    /// raw-key path.
+    /// Raw private-key input is not a scalar in `1..<secp256k1Order`.
     case invalidPrivateKey
 }
 
