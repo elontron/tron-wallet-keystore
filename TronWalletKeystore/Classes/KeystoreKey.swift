@@ -211,7 +211,12 @@ public struct KeystoreKey {
     private func privateKey(password: String) throws -> Data {
         switch type {
         case .encryptedKey:
-            return try decrypt(password: password)
+            let secret = try decrypt(password: password)
+            // Compatibility with keystores written by an older release when an HD keystore was
+            // imported through the raw-private-key path: the payload is the mnemonic (>32 bytes)
+            // and only its first 32 bytes ever defined this key's address and signatures.
+            // `EthereumCrypto` now requires exactly 32 bytes, so keep using them.
+            return secret.count > 32 ? Data(secret.prefix(32)) : secret
         case .hierarchicalDeterministicWallet:
             var decrypted = try decrypt(password: password)
             defer {
