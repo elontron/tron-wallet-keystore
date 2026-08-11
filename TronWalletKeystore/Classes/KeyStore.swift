@@ -31,7 +31,7 @@ public final class KeyStore {
         for url in accountURLs {
             do {
                 let key = try KeystoreKey(contentsOf: url)
-                keysByAddress[key.address] = key
+                cache(key)
                 let account = Account(address: key.address, type: key.type, url: url)
                 accountsByAddress[key.address] = account
             } catch {
@@ -72,7 +72,7 @@ public final class KeyStore {
 
         try withStateLock {
             try save(key: key, to: url)
-            keysByAddress[key.address] = key
+            cache(key)
             accountsByAddress[key.address] = account
         }
         return account
@@ -96,7 +96,7 @@ public final class KeyStore {
         defer { mutationLock.unlock() }
 
         withStateLock {
-            keysByAddress[key.address] = key
+            cache(key)
         }
     }
 
@@ -149,7 +149,7 @@ public final class KeyStore {
 
         try withStateLock {
             try save(key: newKey, to: url)
-            keysByAddress[newKey.address] = newKey
+            cache(newKey)
             accountsByAddress[newKey.address] = account
         }
 
@@ -185,7 +185,7 @@ public final class KeyStore {
 
         try withStateLock {
             try save(key: newKey, to: url)
-            keysByAddress[newKey.address] = newKey
+            cache(newKey)
             accountsByAddress[newKey.address] = account
         }
 
@@ -298,7 +298,7 @@ public final class KeyStore {
         }
         try withStateLock {
             try save(key: newKey, to: account.url)
-            keysByAddress[newKey.address] = newKey
+            cache(newKey)
         }
     }
 
@@ -357,6 +357,14 @@ public final class KeyStore {
         stateLock.lock()
         defer { stateLock.unlock() }
         return try body()
+    }
+
+    /// Removes plaintext HD secrets before retaining a key for the process lifetime.
+    private func cache(_ key: KeystoreKey) {
+        var cachedKey = key
+        cachedKey.mnemonic = nil
+        cachedKey.passphrase = ""
+        keysByAddress[cachedKey.address] = cachedKey
     }
 
     /// Generates a unique file name for an address.

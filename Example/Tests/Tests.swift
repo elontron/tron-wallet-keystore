@@ -60,6 +60,16 @@ class Tests: XCTestCase {
         XCTAssertEqual(try store.exportMnemonic(account: account, password: password), mnemonic)
     }
 
+    func testKeyStoreDoesNotCachePlaintextHDSecrets() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.import(mnemonic: mnemonic, passphrase: "p@ss", encryptPassword: password)
+        let cachedKey = try XCTUnwrap(store.key(for: account.address))
+
+        XCTAssertNil(cachedKey.mnemonic)
+        XCTAssertTrue(cachedKey.passphrase.isEmpty)
+        XCTAssertEqual(try store.exportMnemonic(account: account, password: password), mnemonic)
+    }
+
     func testDifferentPassphrasesDeriveDifferentKeys() throws {
         let a = try Wallet(mnemonic: mnemonic, passphrase: "one").getKey(at: 0).privateKey
         let b = try Wallet(mnemonic: mnemonic, passphrase: "two").getKey(at: 0).privateKey
