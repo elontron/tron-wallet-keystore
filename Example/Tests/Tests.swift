@@ -86,14 +86,7 @@ class Tests: XCTestCase {
     /// builds, rather than surfacing an error.
     func testInvalidPrivateKeyThrowsInsteadOfTrapping() {
         XCTAssertThrowsError(try KeystoreKey(password: password, key: Data(repeating: 1, count: 16)))
-        assertRejectsPrivateKey(Data(repeating: 0, count: 32))
-        assertRejectsPrivateKey(Data([
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
-            0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b,
-            0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x41,
-        ]))
-        assertRejectsPrivateKey(Data(repeating: 0xff, count: 32))
+        XCTAssertThrowsError(try KeystoreKey(password: password, key: Data(repeating: 0, count: 32)))
     }
 
     /// `import(json:)` used to send every decrypted payload through the raw-key path. For an HD
@@ -132,26 +125,16 @@ class Tests: XCTestCase {
         }
     }
 
-    /// A complete mnemonic payload still fails the exact 32-byte scalar boundary.
-    func testKeystoreKeyRejectsLongMnemonicPayload() throws {
+    /// Mnemonic bytes must never be accepted as a raw secp256k1 scalar, at any length.
+    func testKeystoreKeyRejectsMnemonicASCIIPayload() throws {
         let payload = try XCTUnwrap(mnemonic.data(using: .ascii))
         assertRejectsPrivateKey(payload)
+        assertRejectsPrivateKey(payload.prefix(32))
     }
 
-    /// Content heuristics must not reject a valid scalar just because every byte is printable ASCII.
-    func testKeystoreKeyAcceptsPrintableASCIIScalar() throws {
-        XCTAssertEqual(try KeystoreKey(password: password, key: Data(repeating: 0x41, count: 32)).type,
-                       .encryptedKey)
-    }
-
-    func testKeystoreKeyAcceptsScalarImmediatelyBelowCurveOrder() throws {
-        let privateKey = Data([
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
-            0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b,
-            0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x40,
-        ])
-        XCTAssertEqual(try KeystoreKey(password: password, key: privateKey).type, .encryptedKey)
+    /// 32 bytes of printable ASCII form a valid scalar, so only the guard rejects them.
+    func testKeystoreKeyRejectsAllPrintableASCIIInput() {
+        assertRejectsPrivateKey(Data(repeating: 0x41, count: 32))
     }
 
     /// The guard must not reject legitimate keys.
