@@ -359,12 +359,9 @@ public final class KeyStore {
         return try body()
     }
 
-    /// Removes plaintext HD secrets before retaining a key for the process lifetime.
+    /// Retains encrypted key material for the process lifetime.
     private func cache(_ key: KeystoreKey) {
-        var cachedKey = key
-        cachedKey.mnemonic = nil
-        cachedKey.passphrase = ""
-        keysByAddress[cachedKey.address] = cachedKey
+        keysByAddress[key.address] = key
     }
 
     /// Generates a unique file name for an address.

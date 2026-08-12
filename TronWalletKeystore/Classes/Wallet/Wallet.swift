@@ -1,4 +1,5 @@
 
+import Foundation
 import TronCore
 
 /// A hierarchical deterministic wallet.
@@ -6,14 +7,9 @@ public class Wallet {
 //    public static let defaultPath = "m/44'/195'/x'"
     public static let defaultPath = "m/44'/195'/0'/0/0"
 
-    /// Wallet seed.
-    public var seed: Data
-
-    /// Mnemonic word list.
-    public var mnemonic: String
-
-    /// Mnemonic passphrase.
-    public var passphrase: String
+    /// Wallet seed. Keep it private and clear it as soon as the wallet is no longer needed.
+    private var seed: Data?
+    private let seedLock = NSLock()
 
     /// Derivation path.
     public var path: String
@@ -21,9 +17,11 @@ public class Wallet {
     /// Initializes a wallet from a mnemonic string and a passphrase.
     public init(mnemonic: String, passphrase: String = "", path: String = Wallet.defaultPath) throws {
         seed = try Mnemonic.deriveSeed(mnemonic: mnemonic, passphrase: passphrase)
-        self.mnemonic = mnemonic
-        self.passphrase = passphrase
         self.path = path
+    }
+
+    deinit {
+        clearSeed()
     }
 
     /// Initializes a wallet from a mnemonic string and a passphrase.
@@ -39,10 +37,19 @@ public class Wallet {
     }
 
     private func getNode(for derivationPath: DerivationPath) throws -> HDNode {
+        seedLock.lock()
+        defer { seedLock.unlock() }
+
+        guard seed != nil else {
+            throw Error.cleared
+        }
         var node = HDNode()
         // On failure the node is left zeroed with a NULL curve, which the derivation and
         // public-key calls below would dereference.
-        guard hdnode_from_seed([UInt8](seed), Int32(seed.count), "secp256k1", &node) == 1 else {
+        let result = seed!.withUnsafeBytes { (seedPtr: UnsafeRawBufferPointer) -> Int32 in
+            hdnode_from_seed(seedPtr.bindMemory(to: UInt8.self).baseAddress, Int32(seedPtr.count), "secp256k1", &node)
+        }
+        guard result == 1 else {
             throw Error.invalidSeed
         }
         for index in derivationPath.indices {
@@ -60,6 +67,22 @@ public class Wallet {
         let node = try getNode(for: try getDerivationPath(for: index))
         return HDKey(node: node)
     }
+
+    /// Clears the retained seed. The wallet cannot derive more keys afterwards.
+    public func clear() {
+        clearSeed()
+    }
+
+    private func clearSeed() {
+        seedLock.lock()
+        defer { seedLock.unlock() }
+
+        guard let count = seed?.count else {
+            return
+        }
+        seed?.resetBytes(in: 0 ..< count)
+        seed = nil
+    }
 }
 
 extension Wallet {
@@ -67,5 +90,6 @@ extension Wallet {
         case invalidDerivationPath
         case invalidSeed
         case keyDerivationFailed
+        case cleared
     }
 }

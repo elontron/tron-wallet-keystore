@@ -18,19 +18,14 @@ public struct KeystoreKey {
     /// Key header with encrypted private key and crypto parameters.
     public var crypto: KeystoreKeyHeader
 
-    /// Mnemonic passphrase, only populated when this key was just created. It is encrypted
-    /// alongside the mnemonic rather than stored in the JSON, so for keys loaded from disk the
-    /// decrypted payload is the authoritative source and this stays empty.
-    public var passphrase = ""
-    public var mnemonic: String?
-
     /// Mnemonic derivation path
     public var derivationPath = Wallet.defaultPath
 
     /// Key version, must be 3.
     public var version = 3
 
-    /// Creates a new `Key` with a password.
+    /// Creates a new `Key` with a password. Use `generateHDWallet(password:)` when the generated
+    /// mnemonic must be returned for backup.
     public init(password: String, type: AccountType) throws {
         switch type {
         case .encryptedKey:
@@ -57,9 +52,15 @@ public struct KeystoreKey {
             let key = keyRepresentation[(keyRepresentation.count - 32)...]
             try self.init(password: password, key: key)
         case .hierarchicalDeterministicWallet:
-            let mnemonic = try Mnemonic.generate(strength: 128)
-            try self.init(password: password, mnemonic: mnemonic, passphrase: "")
+            self = try KeystoreKey.generateHDWallet(password: password).key
         }
+    }
+
+    /// Creates an HD key and returns its mnemonic without retaining the plaintext in the key.
+    public static func generateHDWallet(password: String) throws -> (key: KeystoreKey, mnemonic: String) {
+        let mnemonic = try Mnemonic.generate(strength: 128)
+        let key = try KeystoreKey(password: password, mnemonic: mnemonic)
+        return (key, mnemonic)
     }
 
     /// Initializes a `Key` from a JSON wallet.
@@ -102,8 +103,6 @@ public struct KeystoreKey {
         let pubKey = key.publicKey
         address = try KeystoreKey.decodeAddress(from: pubKey)
         type = .hierarchicalDeterministicWallet
-        self.passphrase = passphrase
-        self.mnemonic = mnemonic
         self.derivationPath = derivationPath
     }
 

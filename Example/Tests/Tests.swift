@@ -60,14 +60,50 @@ class Tests: XCTestCase {
         XCTAssertEqual(try store.exportMnemonic(account: account, password: password), mnemonic)
     }
 
-    func testKeyStoreDoesNotCachePlaintextHDSecrets() throws {
-        let store = try KeyStore(keyDirectory: keyDirectory)
-        let account = try store.import(mnemonic: mnemonic, passphrase: "p@ss", encryptPassword: password)
-        let cachedKey = try XCTUnwrap(store.key(for: account.address))
+    func testHDObjectsDoNotRetainMnemonicOrPassphrase() throws {
+        let passphrase = "p@ss"
+        let wallet = try Wallet(mnemonic: mnemonic, passphrase: passphrase)
+        let walletFields = Mirror(reflecting: wallet).children.compactMap { $0.label }
+        let walletStrings = Mirror(reflecting: wallet).children.compactMap { $0.value as? String }
+        XCTAssertFalse(walletFields.contains("mnemonic"))
+        XCTAssertFalse(walletFields.contains("passphrase"))
+        XCTAssertFalse(walletStrings.contains(mnemonic))
+        XCTAssertFalse(walletStrings.contains(passphrase))
 
-        XCTAssertNil(cachedKey.mnemonic)
-        XCTAssertTrue(cachedKey.passphrase.isEmpty)
+        let key = try KeystoreKey(password: password, mnemonic: mnemonic, passphrase: passphrase)
+        let keyFields = Mirror(reflecting: key).children.compactMap { $0.label }
+        let keyStrings = Mirror(reflecting: key).children.compactMap { $0.value as? String }
+        XCTAssertFalse(keyFields.contains("mnemonic"))
+        XCTAssertFalse(keyFields.contains("passphrase"))
+        XCTAssertFalse(keyStrings.contains(mnemonic))
+        XCTAssertFalse(keyStrings.contains(passphrase))
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.import(mnemonic: mnemonic, passphrase: passphrase, encryptPassword: password)
+        let cachedKey = try XCTUnwrap(store.key(for: account.address))
+        let cachedStrings = Mirror(reflecting: cachedKey).children.compactMap { $0.value as? String }
+        XCTAssertFalse(cachedStrings.contains(mnemonic))
+        XCTAssertFalse(cachedStrings.contains(passphrase))
+
+        wallet.clear()
+        XCTAssertThrowsError(try wallet.getKey(at: 0)) { error in
+            guard case Wallet.Error.cleared = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
         XCTAssertEqual(try store.exportMnemonic(account: account, password: password), mnemonic)
+    }
+
+    func testGeneratedHDWalletReturnsMnemonicWithoutRetainingIt() throws {
+        let generated = try KeystoreKey.generateHDWallet(password: password)
+        XCTAssertTrue(Mnemonic.isValid(generated.mnemonic))
+        XCTAssertEqual(try KeystoreKey(password: password, mnemonic: generated.mnemonic).address,
+                       generated.key.address)
+        XCTAssertFalse(Mirror(reflecting: generated.key).children.compactMap { $0.label }.contains("mnemonic"))
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.createAccount(password: password, type: .hierarchicalDeterministicWallet)
+        XCTAssertTrue(Mnemonic.isValid(try store.exportMnemonic(account: account, password: password)))
     }
 
     func testDifferentPassphrasesDeriveDifferentKeys() throws {
