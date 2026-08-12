@@ -54,6 +54,50 @@ public struct ScryptParams {
     /// Default desired key length of Scrypt encryption algorithm.
     public static let defaultDesiredKeyLength = 32
 
+    /// Upper bound on scrypt's peak working memory, which is `128 * r * n` bytes.
+    ///
+    /// go-ethereum's `standardN` preset (n = 262144, r = 8) needs 256 MiB and is the
+    /// strongest configuration desktop wallets actually produce, so this leaves one
+    /// doubling of headroom above it for anything unusual a user might import. Past this
+    /// point the allocation could not complete on a supported device anyway: the three
+    /// `UnsafeMutableRawPointer.allocate` calls in `Scrypt.scrypt` abort the process on
+    /// failure rather than throwing, so an unbounded `n` is an uncatchable crash, not a
+    /// feature (see TL-KDF-002).
+    public static let maxMemoryBytes = 512 * 1024 * 1024
+
+    /// Flat ceiling on the cost factor, matching Android's `1048576`. The `maxMemoryBytes`
+    /// rule is the stricter of the two once `r >= 8`, but at `r = 1` it would allow 2^22 —
+    /// looser than Android. Both bounds apply, so the clients cannot diverge in either
+    /// direction on `n`.
+    public static let maxN = 1 << 20
+
+    /// Upper bound on the block size factor. Every preset in use sets `r = 8`; the wider
+    /// range exists only to match Android (see the note on `maxP`). Large `r` cannot
+    /// exhaust memory on its own because `maxMemoryBytes` caps `128 * r * n`.
+    public static let maxR = 64
+
+    /// Upper bound on the parallelization factor.
+    ///
+    /// - Note (TL-KDF-002, double-ended alignment):
+    ///   These three limits mirror the Android client's `org.tron.net.KeyStoreUtils`,
+    ///   which rejects `r` outside 1...64, `p` outside 1...16 and `dklen` outside
+    ///   32...1024. A keystore is a file users move between the two apps, so the same
+    ///   file has to be accepted or refused on both. Only `n` intentionally stays
+    ///   stricter here: Android caps it at a flat 2^20, which at `r = 8` asks for 1 GiB
+    ///   and would be killed by jetsam on iOS, so `n` remains bounded by
+    ///   `maxMemoryBytes` instead. Widening `p` costs CPU time only — it never enters
+    ///   the `128 * r * n` allocation.
+    public static let maxP = 16
+
+    /// Minimum derived-key length. `KeystoreKey.decrypt` takes the leading 16 bytes as
+    /// the AES key and the trailing 16 bytes as the MAC prefix, so a shorter derived
+    /// key makes those two slices overlap or read out of bounds.
+    public static let minDesiredKeyLength = 32
+
+    /// Upper bound on the derived-key length. No standard V3 keystore exceeds 32; the
+    /// headroom matches Android. Extra length is merely discarded by `decrypt`.
+    public static let maxDesiredKeyLength = 1024
+
     /// Random salt.
     public var salt: Data
 
@@ -94,18 +138,48 @@ public struct ScryptParams {
 
     /// Validates the parameters.
     ///
+    /// This is the single gate in front of `Scrypt.calculate`, and `init(from:)` decodes
+    /// `n` / `r` / `p` / `dklen` straight out of keystore JSON, so every value reaching
+    /// this function must be treated as attacker-controlled.
+    ///
+    /// - Note (TL-KDF-002, 2026-08 audit):
+    ///   The previous implementation converted to `UInt64` and divided by `p` and `r`
+    ///   *before* establishing that they were positive, so `r = -1`, `r = 0` and `p = 0`
+    ///   trapped inside this very function instead of being rejected — an uncatchable
+    ///   crash on a malformed import. It also let two dangerous configurations through:
+    ///   `dklen = 0`, which made `KeystoreKey.decrypt` slice out of bounds, and any
+    ///   power-of-two `n` large enough to ask scrypt for terabytes while still passing
+    ///   the `Int.max` overflow guard. The order below is load-bearing: positivity is
+    ///   established first, and every later division uses a divisor already known to be
+    ///   positive and bounded.
+    ///
     /// - Returns: a `ValidationError` or `nil` if the parameters are valid.
     public func validate() -> ValidationError? {
-        if desiredKeyLength > ((1 << 32 as Int64) - 1 as Int64) * 32 {
+        // Positivity first. Everything after this point either divides by one of these
+        // values or relies on them not being negative.
+        guard n > 1, r > 0, p > 0 else {
+            return ValidationError.nonPositiveParameter
+        }
+        // Android refuses a keystore with no scrypt salt outright; deriving from an empty
+        // salt would otherwise make the KDF output depend on the password alone.
+        if salt.isEmpty {
+            return ValidationError.emptySalt
+        }
+        if desiredKeyLength < ScryptParams.minDesiredKeyLength {
+            return ValidationError.desiredKeyLengthTooSmall
+        }
+        if desiredKeyLength > ScryptParams.maxDesiredKeyLength {
             return ValidationError.desiredKeyLengthTooLarge
         }
-        if UInt64(r) * UInt64(p) >= (1 << 30) {
-            return ValidationError.blockSizeTooLarge
-        }
-        if n & (n - 1) != 0 || n < 2 {
+        if n & (n - 1) != 0 || n > ScryptParams.maxN {
             return ValidationError.invalidCostFactor
         }
-        if (r > Int.max / 128 / p) || (n > Int.max / 128 / r) {
+        if r > ScryptParams.maxR || p > ScryptParams.maxP {
+            return ValidationError.blockSizeTooLarge
+        }
+        // `r` is positive and bounded above by now, so this division is safe, and it caps
+        // `n` before `128 * r * n` can overflow or reach the allocator.
+        if n > ScryptParams.maxMemoryBytes / 128 / r {
             return ValidationError.overflow
         }
         return nil
@@ -116,6 +190,12 @@ public struct ScryptParams {
         case blockSizeTooLarge
         case invalidCostFactor
         case overflow
+        /// `n`, `r` or `p` was zero or negative (TL-KDF-002).
+        case nonPositiveParameter
+        /// `dklen` was shorter than the 32 bytes `KeystoreKey.decrypt` slices (TL-KDF-002).
+        case desiredKeyLengthTooSmall
+        /// The keystore carried no scrypt salt (TL-KDF-002).
+        case emptySalt
     }
 }
 

@@ -220,6 +220,186 @@ class Tests: XCTestCase {
         XCTAssertEqual(try KeyStore(keyDirectory: keyDirectory).accounts.count, 1)
     }
 
+    // MARK: - TL-KDF-002: scrypt parameters arriving from untrusted keystore JSON
+
+    /// Every preset the app has ever written to disk, plus the desktop preset users import
+    /// from, must keep validating. A regression here bricks existing wallets rather than
+    /// merely rejecting an import, so this is the guard rail on the new upper bounds.
+    func testValidateAcceptsShippedAndStandardPresets() {
+        let salt = Data(repeating: 0xAB, count: 32)
+        let presets: [(String, Int, Int, Int)] = [
+            ("light — what 1.0.4 wrote on disk", ScryptParams.lightN, ScryptParams.defaultR, ScryptParams.lightP),
+            ("balanced — current default", ScryptParams.balancedN, ScryptParams.defaultR, ScryptParams.balancedP),
+            ("go-ethereum standard — imported from desktop", ScryptParams.standardN, ScryptParams.defaultR, ScryptParams.standardP),
+            // The memory ceiling itself: 128 * 8 * 2^19 == 512 MiB exactly. Pinning the
+            // boundary from the accepting side catches an off-by-one that would silently
+            // start rejecting the strongest configuration we intend to support.
+            ("largest n the memory cap admits at r = 8", 1 << 19, ScryptParams.defaultR, 1),
+        ]
+        for (label, n, r, p) in presets {
+            XCTAssertNoThrow(
+                try ScryptParams(salt: salt, n: n, r: r, p: p, desiredKeyLength: ScryptParams.defaultDesiredKeyLength),
+                "\(label) must remain valid"
+            )
+        }
+    }
+
+    /// The `r` / `p` / `dklen` ceilings deliberately match Android's
+    /// `org.tron.net.KeyStoreUtils`, which rejects `r` outside 1...64, `p` outside 1...16
+    /// and `dklen` outside 32...1024. A keystore is a file users carry between the two
+    /// apps, so a file accepted on one must be accepted on the other.
+    func testValidateMatchesAndroidBoundsForRPAndDklen() {
+        let salt = Data(repeating: 0xAB, count: 32)
+
+        // Exactly Android's ceilings — must be accepted.
+        XCTAssertNoThrow(try ScryptParams(salt: salt, n: 4096, r: 64, p: 1, desiredKeyLength: 32))
+        XCTAssertNoThrow(try ScryptParams(salt: salt, n: 4096, r: 8, p: 16, desiredKeyLength: 32))
+        XCTAssertNoThrow(try ScryptParams(salt: salt, n: 4096, r: 8, p: 1, desiredKeyLength: 1024))
+
+        // One past each — must be refused on both clients.
+        XCTAssertThrowsError(try ScryptParams(salt: salt, n: 4096, r: 65, p: 1, desiredKeyLength: 32))
+        XCTAssertThrowsError(try ScryptParams(salt: salt, n: 4096, r: 8, p: 17, desiredKeyLength: 32))
+        XCTAssertThrowsError(try ScryptParams(salt: salt, n: 4096, r: 8, p: 1, desiredKeyLength: 1025))
+
+        // At r = 1 the memory rule alone would allow 2^22, which Android rejects. The flat
+        // `maxN` ceiling keeps the two clients from diverging in that direction too.
+        XCTAssertNoThrow(try ScryptParams(salt: salt, n: 1 << 20, r: 1, p: 1, desiredKeyLength: 32))
+        XCTAssertThrowsError(try ScryptParams(salt: salt, n: 1 << 21, r: 1, p: 1, desiredKeyLength: 32))
+        XCTAssertThrowsError(try ScryptParams(salt: salt, n: 1 << 22, r: 1, p: 1, desiredKeyLength: 32))
+    }
+
+    /// Android refuses a keystore carrying no scrypt salt, and so must we: deriving from
+    /// an empty salt makes the KDF output depend on the password alone.
+    func testValidateRejectsEmptySalt() {
+        XCTAssertThrowsError(
+            try ScryptParams(salt: Data(), n: 4096, r: 8, p: 1, desiredKeyLength: 32)
+        ) { error in
+            guard let validationError = error as? ScryptParams.ValidationError,
+                  case .emptySalt = validationError else {
+                XCTFail("Expected emptySalt, got \(error)")
+                return
+            }
+        }
+    }
+
+    /// Hostile values must be *rejected*, not trapped.
+    ///
+    /// Before TL-KDF-002 the negative and zero cases below crashed inside `validate()`
+    /// itself — `UInt64(-1)` on the block-size line, and division by `p`/`r` on the
+    /// overflow line — so this test would have taken the whole runner down instead of
+    /// failing. `dklen = 0` and the oversized `n` values were accepted outright and blew
+    /// up further downstream, in `decrypt`'s slicing and in the scrypt allocator.
+    func testValidateRejectsHostileParametersWithoutTrapping() {
+        let salt = Data(repeating: 0xAB, count: 32)
+        let hostile: [(String, Int, Int, Int, Int)] = [
+            ("negative r", 4096, -1, 1, 32),
+            ("zero r", 4096, 0, 1, 32),
+            ("zero p", 4096, 8, 0, 32),
+            ("negative p", 4096, 8, -1, 32),
+            ("zero n", 0, 8, 1, 32),
+            ("negative n", -4096, 8, 1, 32),
+            ("n not a power of two", 4097, 8, 1, 32),
+            ("n one step past the memory cap", 1 << 20, 8, 1, 32),
+            ("n = 2^40", 1 << 40, 8, 1, 32),
+            ("dklen 0", 4096, 8, 1, 0),
+            ("dklen 16 — decrypt's two slices would overlap", 4096, 8, 1, 16),
+            ("negative dklen", 4096, 8, 1, -1),
+            ("dklen Int.max", 4096, 8, 1, Int.max),
+            ("dklen past its cap", 4096, 8, 1, 1025),
+            ("r past its cap", 4096, 65, 1, 32),
+            ("p past its cap", 4096, 8, 17, 32),
+        ]
+        for (label, n, r, p, dklen) in hostile {
+            XCTAssertThrowsError(
+                try ScryptParams(salt: salt, n: n, r: r, p: p, desiredKeyLength: dklen),
+                "\(label) must be rejected"
+            ) { error in
+                XCTAssertTrue(
+                    error is ScryptParams.ValidationError,
+                    "\(label) must fail with a typed ValidationError, got \(error)"
+                )
+            }
+        }
+    }
+
+    /// Backward compatibility, end to end. The light preset is what every install predating
+    /// TL-KDF-001 has sitting on disk, so the new bounds must let those files through.
+    /// Loading never decrypts — `KeystoreKey(contentsOf:)` only decodes — so the bounds are
+    /// first reached at unlock time, and this asserts scrypt actually runs to completion there.
+    func testLegacyLightPresetStillDerivesUnderNewBounds() throws {
+        let params = try ScryptParams(salt: Data(repeating: 0xAB, count: 32),
+                                      n: ScryptParams.lightN,
+                                      r: ScryptParams.defaultR,
+                                      p: ScryptParams.lightP,
+                                      desiredKeyLength: ScryptParams.defaultDesiredKeyLength)
+        XCTAssertNil(params.validate())
+        XCTAssertEqual(try Scrypt(params: params).calculate(password: password).count, 32)
+
+        // And through the file path: a light-preset keystore must fail on its deliberately
+        // junk MAC, never on parameter validation — that is what proves it got through.
+        let json = makeKeystoreJSON(n: ScryptParams.lightN,
+                                    r: ScryptParams.defaultR,
+                                    p: ScryptParams.lightP,
+                                    dklen: ScryptParams.defaultDesiredKeyLength)
+        let key = try JSONDecoder().decode(KeystoreKey.self, from: json)
+        XCTAssertThrowsError(try key.decrypt(password: password)) { error in
+            XCTAssertFalse(error is ScryptParams.ValidationError,
+                           "The light preset must not be rejected by the new bounds, got \(error)")
+        }
+    }
+
+    /// The actual attack path, end to end: a keystore file carrying hostile kdfparams.
+    ///
+    /// Decoding must stay permissive — `KeyStore.load()` silently skips files it cannot
+    /// decode, so tightening `init(from:)` would make a wallet vanish from the list with
+    /// no error at all. The rejection belongs at decryption time, where it surfaces as a
+    /// catchable error.
+    func testHostileKDFParamsDecodeButFailToDecrypt() throws {
+        let hostile: [(String, Int, Int, Int, Int)] = [
+            ("negative r", 4096, -1, 1, 32),
+            ("zero p", 4096, 8, 0, 32),
+            ("dklen 0", 4096, 8, 1, 0),
+            ("n = 2^40", 1 << 40, 8, 1, 32),
+        ]
+        for (label, n, r, p, dklen) in hostile {
+            let json = makeKeystoreJSON(n: n, r: r, p: p, dklen: dklen)
+            let key = try JSONDecoder().decode(KeystoreKey.self, from: json)
+            XCTAssertEqual(key.crypto.kdfParams.n, n, "\(label): decoding must stay permissive")
+            XCTAssertThrowsError(
+                try key.decrypt(password: password),
+                "\(label) must throw rather than trap or exhaust memory"
+            )
+        }
+    }
+
+    /// Builds a syntactically valid V3 keystore carrying arbitrary kdfparams. The MAC is
+    /// junk on purpose: these files must be rejected on their parameters, long before any
+    /// password check could matter.
+    private func makeKeystoreJSON(n: Int, r: Int, p: Int, dklen: Int) -> Data {
+        let json: [String: Any] = [
+            "address": "410000000000000000000000000000000000000000",
+            "type": "private-key",
+            "id": UUID().uuidString.lowercased(),
+            "version": 3,
+            "crypto": [
+                "ciphertext": String(repeating: "00", count: 32),
+                "cipher": "aes-128-ctr",
+                "cipherparams": ["iv": String(repeating: "00", count: 16)],
+                "kdf": "scrypt",
+                "kdfparams": [
+                    "salt": String(repeating: "00", count: 32),
+                    "dklen": dklen,
+                    "n": n,
+                    "p": p,
+                    "r": r,
+                ],
+                "mac": String(repeating: "00", count: 32),
+            ],
+        ]
+        // Force-try is fine here: the literal above is always serializable.
+        return try! JSONSerialization.data(withJSONObject: json)
+    }
+
     private func assertRejectsPrivateKey(_ key: Data, file: StaticString = #file, line: UInt = #line) {
         XCTAssertThrowsError(try KeystoreKey(password: password, key: key), file: file, line: line) { error in
             switch error as? EncryptError {
