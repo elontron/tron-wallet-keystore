@@ -307,11 +307,18 @@ public final class KeyStore {
         mutationLock.lock()
         defer { mutationLock.unlock() }
 
-        try withStateLock {
-            guard keysByAddress[account.address] != nil else {
+        let (key, storedAccount) = try withStateLock { () -> (KeystoreKey, Account) in
+            guard let key = keysByAddress[account.address],
+                  let storedAccount = accountsByAddress[account.address] else {
                 throw DecryptError.missingAccountKey
             }
-            try FileManager.default.removeItem(at: account.url)
+            return (key, storedAccount)
+        }
+        var decryptedKey = try key.decrypt(password: password)
+        decryptedKey.resetBytes(in: 0..<decryptedKey.count)
+
+        try withStateLock {
+            try FileManager.default.removeItem(at: storedAccount.url)
             keysByAddress[account.address] = nil
             accountsByAddress[account.address] = nil
         }

@@ -106,6 +106,31 @@ class Tests: XCTestCase {
         XCTAssertTrue(Mnemonic.isValid(try store.exportMnemonic(account: account, password: password)))
     }
 
+    func testDeleteRequiresCorrectPassword() throws {
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = try store.import(mnemonic: mnemonic, encryptPassword: password)
+
+        XCTAssertThrowsError(try store.delete(account: account, password: "wrong-password")) { error in
+            guard case DecryptError.invalidPassword = error else {
+                return XCTFail("Expected invalidPassword, got \(error)")
+            }
+        }
+        XCTAssertNotNil(store.account(for: account.address))
+        XCTAssertNotNil(store.key(for: account.address))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: account.url.path))
+
+        let unrelatedURL = keyDirectory.appendingPathComponent("unrelated")
+        try Data().write(to: unrelatedURL)
+        var suppliedAccount = account
+        suppliedAccount.url = unrelatedURL
+
+        try store.delete(account: suppliedAccount, password: password)
+        XCTAssertNil(store.account(for: account.address))
+        XCTAssertNil(store.key(for: account.address))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: account.url.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unrelatedURL.path))
+    }
+
     func testDifferentPassphrasesDeriveDifferentKeys() throws {
         let a = try Wallet(mnemonic: mnemonic, passphrase: "one").getKey(at: 0).privateKey
         let b = try Wallet(mnemonic: mnemonic, passphrase: "two").getKey(at: 0).privateKey
