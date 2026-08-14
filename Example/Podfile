@@ -3,7 +3,6 @@ use_frameworks!
 platform :ios, '13.0'
 
 target 'TronWalletKeystore_Example' do
-  pod 'TronWalletABI', :git => 'https://github.com/elontron/tron-wallet-abi', :branch => 'security-optimization'
   pod 'TronWalletKeystore', :path => '../'
 
   target 'TronWalletKeystore_Tests' do
