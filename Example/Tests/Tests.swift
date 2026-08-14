@@ -177,6 +177,38 @@ class Tests: XCTestCase {
                        try store.exportPrivateKey(account: account, password: password))
     }
 
+    func testUpdatePasswordPreservesCustomDerivationPathAndRejectsAddressChange() throws {
+        let customPath = "m/44'/195'/7'/0/3"
+        let importingStore = try KeyStore(keyDirectory: keyDirectory)
+        let account = try importingStore.import(mnemonic: mnemonic, derivationPath: customPath, encryptPassword: password)
+        let privateKey = try importingStore.exportPrivateKey(account: account, password: password)
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let storedAccount = try XCTUnwrap(store.account(for: account.address))
+
+        XCTAssertThrowsError(try store.update(account: storedAccount,
+                                              password: password,
+                                              newPassword: "wrong-path-password",
+                                              derivationPath: Wallet.defaultPath)) { error in
+            guard case KeyStore.Error.invalidKey = error else {
+                return XCTFail("expected invalidKey, got \(error)")
+            }
+        }
+
+        let unchangedStore = try KeyStore(keyDirectory: keyDirectory)
+        let unchangedAccount = try XCTUnwrap(unchangedStore.account(for: account.address))
+        XCTAssertEqual(try unchangedStore.generateWalletPath(account: unchangedAccount), customPath)
+        XCTAssertEqual(try unchangedStore.exportPrivateKey(account: unchangedAccount, password: password), privateKey)
+
+        let updatedPassword = "updated-keystore-password"
+        try unchangedStore.update(account: unchangedAccount, password: password, newPassword: updatedPassword)
+
+        let reloaded = try KeyStore(keyDirectory: keyDirectory)
+        let reloadedAccount = try XCTUnwrap(reloaded.account(for: account.address))
+        XCTAssertEqual(try reloaded.generateWalletPath(account: reloadedAccount), customPath)
+        XCTAssertEqual(try reloaded.exportPrivateKey(account: reloadedAccount, password: updatedPassword), privateKey)
+    }
+
     func testLegacyOversizedEncryptedKeyUsesFirst32BytesAcrossKeyStoreAPIs() throws {
         let legacy = try makeLegacyOversizedEncryptedKey()
         XCTAssertGreaterThan(try legacy.key.decrypt(password: password).count, legacy.privateKey.count)

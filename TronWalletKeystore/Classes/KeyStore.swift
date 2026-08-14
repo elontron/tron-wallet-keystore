@@ -284,7 +284,8 @@ public final class KeyStore {
     ///   - account: account to update
     ///   - password: current password
     ///   - newPassword: new password
-    public func update(account: Account, password: String, newPassword: String, derivationPath: String = Wallet.defaultPath) throws {
+    ///   - derivationPath: optional HD wallet derivation path; defaults to the stored key path
+    public func update(account: Account, password: String, newPassword: String, derivationPath: String? = nil) throws {
         mutationLock.lock()
         defer { mutationLock.unlock() }
 
@@ -306,7 +307,13 @@ public final class KeyStore {
                 privateKey.resetBytes(in: 0..<privateKey.count)
             }
             let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(privateKey)
-            newKey = try KeystoreKey(password: newPassword, mnemonic: mnemonic, passphrase: passphrase, derivationPath: derivationPath)
+            newKey = try KeystoreKey(password: newPassword,
+                                      mnemonic: mnemonic,
+                                      passphrase: passphrase,
+                                      derivationPath: derivationPath ?? key.derivationPath)
+        }
+        guard newKey.address == key.address else {
+            throw Error.invalidKey
         }
         try withStateLock {
             try save(key: newKey, to: account.url)
