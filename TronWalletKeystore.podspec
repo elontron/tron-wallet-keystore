@@ -21,7 +21,7 @@ Pod::Spec.new do |s|
   s.module_name = 'TronKeystore'
   s.source_files = 'TronWalletKeystore/Classes/**/*'
   s.dependency 'CryptoSwift', '~> 1.8.4'
-  s.dependency 'TronWalletABI', '~> 1.0.0'
+  s.dependency 'TronWalletABI', '1.0.2'
 
   s.pod_target_xcconfig = { 'SWIFT_OPTIMIZATION_LEVEL' => '-Owholemodule' }
 end
