@@ -205,17 +205,22 @@ public struct KeystoreKey {
         return try KeystoreKey.checkedSignature(EthereumCrypto.sign(hash: hash, privateKey: key))
     }
 
-    /// Decrypts the key and derives the private key to sign with. The caller owns the result and
+    /// Decrypts the key and derives the private key used by account operations. The caller owns the result and
     /// is responsible for clearing it.
-    private func privateKey(password: String) throws -> Data {
+    func privateKey(password: String) throws -> Data {
         switch type {
         case .encryptedKey:
-            let secret = try decrypt(password: password)
+            var secret = try decrypt(password: password)
             // Compatibility with keystores written by an older release when an HD keystore was
             // imported through the raw-private-key path: the payload is the mnemonic (>32 bytes)
             // and only its first 32 bytes ever defined this key's address and signatures.
             // `EthereumCrypto` now requires exactly 32 bytes, so keep using them.
-            return secret.count > 32 ? Data(secret.prefix(32)) : secret
+            guard secret.count > 32 else {
+                return secret
+            }
+            let key = Data(secret.prefix(32))
+            secret.resetBytes(in: 0 ..< secret.count)
+            return key
         case .hierarchicalDeterministicWallet:
             var decrypted = try decrypt(password: password)
             defer {

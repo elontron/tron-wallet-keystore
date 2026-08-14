@@ -177,6 +177,34 @@ class Tests: XCTestCase {
                        try store.exportPrivateKey(account: account, password: password))
     }
 
+    func testLegacyOversizedEncryptedKeyUsesFirst32BytesAcrossKeyStoreAPIs() throws {
+        let legacy = try makeLegacyOversizedEncryptedKey()
+        XCTAssertGreaterThan(try legacy.key.decrypt(password: password).count, legacy.privateKey.count)
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        let account = Account(address: legacy.key.address,
+                              type: .encryptedKey,
+                              url: keyDirectory.appendingPathComponent("legacy-oversized.json"))
+        try store.addKey(key: legacy.key)
+        try store.addAccount(account: account)
+
+        XCTAssertEqual(try store.exportPrivateKey(account: account, password: password), legacy.privateKey)
+
+        let exported = try store.export(account: account, password: password, newPassword: password)
+        let exportedKey = try JSONDecoder().decode(KeystoreKey.self, from: exported)
+        XCTAssertEqual(exportedKey.type, .encryptedKey)
+        XCTAssertEqual(try exportedKey.decrypt(password: password), legacy.privateKey)
+
+        let updatedPassword = "updated-keystore-password"
+        try store.update(account: account, password: password, newPassword: updatedPassword)
+        XCTAssertEqual(try store.exportPrivateKey(account: account, password: updatedPassword), legacy.privateKey)
+
+        let target = try KeyStore(keyDirectory: keyDirectory.appendingPathComponent("legacy-imported"))
+        let imported = try target.import(json: legacy.json, password: password, newPassword: updatedPassword)
+        XCTAssertEqual(imported.address, legacy.key.address)
+        XCTAssertEqual(try target.exportPrivateKey(account: imported, password: updatedPassword), legacy.privateKey)
+    }
+
     /// A keystore whose declared address disagrees with the decrypted secret is tampered with.
     func testImportRejectsAddressMismatch() throws {
         let store = try KeyStore(keyDirectory: keyDirectory)
@@ -459,6 +487,17 @@ class Tests: XCTestCase {
         ]
         // Force-try is fine here: the literal above is always serializable.
         return try! JSONSerialization.data(withJSONObject: json)
+    }
+
+    private func makeLegacyOversizedEncryptedKey() throws -> (key: KeystoreKey, privateKey: Data, json: Data) {
+        let privateKey = try Wallet(mnemonic: mnemonic).getKey(at: 0).privateKey
+        var payload = privateKey
+        payload.append(contentsOf: Array(" legacy oversized encrypted-key payload".utf8))
+
+        var key = try KeystoreKey(password: password, key: privateKey)
+        key.crypto = try KeystoreKeyHeader(password: password, data: payload)
+        key.type = .encryptedKey
+        return (key, privateKey, try JSONEncoder().encode(key))
     }
 
     private func assertRejectsPrivateKey(_ key: Data, file: StaticString = #file, line: UInt = #line) {

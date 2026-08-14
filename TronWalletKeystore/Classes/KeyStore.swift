@@ -116,16 +116,19 @@ public final class KeyStore {
             throw Error.accountAlreadyExists
         }
 
-        var privateKey = try key.decrypt(password: password)
-        defer {
-            privateKey.resetBytes(in: 0..<privateKey.count)
-        }
-
         let newKey: KeystoreKey
         switch key.type {
         case .encryptedKey:
+            var privateKey = try key.privateKey(password: password)
+            defer {
+                privateKey.resetBytes(in: 0..<privateKey.count)
+            }
             newKey = try KeystoreKey(password: newPassword, key: privateKey)
         case .hierarchicalDeterministicWallet:
+            var privateKey = try key.decrypt(password: password)
+            defer {
+                privateKey.resetBytes(in: 0..<privateKey.count)
+            }
             // An HD keystore's ciphertext holds the mnemonic, not a raw scalar, so it has to be
             // rebuilt through the mnemonic path, mirroring `export()` below. Handing the payload
             // to `KeystoreKey(password:key:)` would make the private key the first 32 characters
@@ -204,16 +207,19 @@ public final class KeyStore {
             throw DecryptError.missingAccountKey
         }
 
-        var privateKey = try key.decrypt(password: password)
-        defer {
-            privateKey.resetBytes(in: 0..<privateKey.count)
-        }
-
         let newKey: KeystoreKey
         switch key.type {
         case .encryptedKey:
+            var privateKey = try key.privateKey(password: password)
+            defer {
+                privateKey.resetBytes(in: 0..<privateKey.count)
+            }
             newKey = try KeystoreKey(password: newPassword, key: privateKey)
         case .hierarchicalDeterministicWallet:
+            var privateKey = try key.decrypt(password: password)
+            defer {
+                privateKey.resetBytes(in: 0..<privateKey.count)
+            }
             let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(privateKey)
             newKey = try KeystoreKey(password: newPassword, mnemonic: mnemonic, passphrase: passphrase, derivationPath: key.derivationPath)
         }
@@ -231,15 +237,18 @@ public final class KeyStore {
             throw DecryptError.missingAccountKey
         }
 
-        var privateKey = try key.decrypt(password: password)
-        defer {
-            privateKey.resetBytes(in: 0..<privateKey.count)
-        }
-
         switch key.type {
         case .encryptedKey:
+            var privateKey = try key.privateKey(password: password)
+            defer {
+                privateKey.resetBytes(in: 0..<privateKey.count)
+            }
             return privateKey
         case .hierarchicalDeterministicWallet:
+            var privateKey = try key.decrypt(password: password)
+            defer {
+                privateKey.resetBytes(in: 0..<privateKey.count)
+            }
             let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(privateKey)
             return try Wallet(mnemonic: mnemonic, passphrase: passphrase, path: key.derivationPath).getKey(at: 0).privateKey
         }
@@ -283,16 +292,19 @@ public final class KeyStore {
             throw DecryptError.missingAccountKey
         }
 
-        var privateKey = try key.decrypt(password: password)
-        defer {
-            privateKey.resetBytes(in: 0..<privateKey.count)
-        }
-
         let newKey: KeystoreKey
         switch key.type {
         case .encryptedKey:
+            var privateKey = try key.privateKey(password: password)
+            defer {
+                privateKey.resetBytes(in: 0..<privateKey.count)
+            }
             newKey = try KeystoreKey(password: newPassword, key: privateKey)
         case .hierarchicalDeterministicWallet:
+            var privateKey = try key.decrypt(password: password)
+            defer {
+                privateKey.resetBytes(in: 0..<privateKey.count)
+            }
             let (mnemonic, passphrase) = try KeystoreKey.splitMnemonicPayload(privateKey)
             newKey = try KeystoreKey(password: newPassword, mnemonic: mnemonic, passphrase: passphrase, derivationPath: derivationPath)
         }
