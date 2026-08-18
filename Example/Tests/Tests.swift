@@ -106,6 +106,23 @@ class Tests: XCTestCase {
         XCTAssertTrue(Mnemonic.isValid(try store.exportMnemonic(account: account, password: password)))
     }
 
+    func testEncryptedKeyGenerationIsRejectedWithoutSideEffects() throws {
+        XCTAssertThrowsError(try KeystoreKey(password: password, type: .encryptedKey)) { error in
+            guard case EncryptError.generateKeyPairFail = error else {
+                return XCTFail("Expected generateKeyPairFail, got \(error)")
+            }
+        }
+
+        let store = try KeyStore(keyDirectory: keyDirectory)
+        XCTAssertThrowsError(try store.createAccount(password: password, type: .encryptedKey)) { error in
+            guard case EncryptError.generateKeyPairFail = error else {
+                return XCTFail("Expected generateKeyPairFail, got \(error)")
+            }
+        }
+        XCTAssertTrue(store.accounts.isEmpty)
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(at: keyDirectory, includingPropertiesForKeys: []).isEmpty)
+    }
+
     func testDeleteRequiresCorrectPassword() throws {
         let store = try KeyStore(keyDirectory: keyDirectory)
         let account = try store.import(mnemonic: mnemonic, encryptPassword: password)
